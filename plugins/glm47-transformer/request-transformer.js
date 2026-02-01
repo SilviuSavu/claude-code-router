@@ -1,7 +1,7 @@
 // request-transformer.js
-import fs from 'fs';
-import path from 'path';
-import crypto from 'crypto';
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 // Debug log file
 const DEBUG_LOG = path.join(process.env.HOME, '.claude-code-router', 'debug-web-search.log');
@@ -32,7 +32,9 @@ class RequestTransformer {
     const transformed = { ...request };
 
     // Extract conversation ID for thinking preservation
-    const conversationId = this.getConversationId(transformed.messages || []);
+    const conversationId = options.conversationId || this.getConversationId(transformed.messages || []);
+    const agentId = options.agentId || null;
+    const multiSessionManager = options.multiSessionManager || null;
 
     // 1. Inject reasoning prompt if forceReasoning enabled
     if (options.forceReasoning) {
@@ -40,8 +42,18 @@ class RequestTransformer {
     }
 
     // 2. Restore preserved thinking from previous turns
+    // Use MultiSessionManager if available and enabled, otherwise fall back to ThinkingManager
     if (options.preserveThinking) {
-      transformed.messages = this.restoreThinkingBlocks(transformed.messages, conversationId);
+      if (multiSessionManager && agentId) {
+        transformed.messages = this.restoreThinkingBlocksFromMultiSession(
+          transformed.messages,
+          conversationId,
+          agentId,
+          multiSessionManager
+        );
+      } else {
+        transformed.messages = this.restoreThinkingBlocks(transformed.messages, conversationId);
+      }
     }
 
     // 3. Sanitize any provider_specific_fields from history
@@ -84,6 +96,36 @@ class RequestTransformer {
       transformed.tool_stream = true;
     }
 
+    // 10. Enable GLM native web_search when Claude Code includes current date in system prompt
+    // Claude Code includes "Today's date: YYYY-MM-DD" in the system prompt when web search might be needed
+    const systemMessage = transformed.messages.find(m => m.role === 'system');
+    let enableWebSearch = false;
+
+    if (systemMessage) {
+      const systemContent = typeof systemMessage.content === 'string'
+        ? systemMessage.content
+        : Array.isArray(systemMessage.content)
+          ? systemMessage.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+          : '';
+
+      // Check for current date pattern (Claude Code adds this for web search requests)
+      // Format: "Today's date: 2026-02-01"
+      const dateMatch = systemContent.match(/Today's date:\s*\d{4}-\d{2}-\d{2}/);
+      if (dateMatch) {
+        enableWebSearch = true;
+        debugLog('WEB_SEARCH_ENABLED', {
+          reason: 'Current date detected in system prompt',
+          date: dateMatch[0],
+          prompt: systemContent.substring(0, 200)
+        }, this.debug);
+      }
+    }
+
+    // Enable GLM native web_search (this is GLM-specific, not OpenAI)
+    if (enableWebSearch) {
+      transformed.web_search = true;
+    }
+
     return transformed;
   }
 
@@ -120,6 +162,80 @@ This is critical for maintaining accuracy.
     }
 
     return messages;
+  }
+
+  /**
+   * Restore thinking blocks from MultiSessionManager
+   * This enables thinking sharing across parallel agents on the same conversation
+   */
+  restoreThinkingBlocksFromMultiSession(messages, conversationId, agentId, multiSessionManager) {
+    // Get preserved thinking from MultiSessionManager
+    const preservedThinking = multiSessionManager.getThinking(conversationId, agentId);
+
+    if (!preservedThinking) {
+      // Fall back to standard ThinkingManager if no multi-session thinking found
+      return this.restoreThinkingBlocks(messages, conversationId);
+    }
+
+    debugLog('RESTORED_MULTI_SESSION_THINKING', {
+      conversationId,
+      agentId,
+      thinkingLength: preservedThinking.length
+    }, this.debug);
+
+    // Convert Anthropic thinking blocks back to GLM reasoning_content format
+    return messages.map(msg => {
+      if (msg.role !== 'assistant') return msg;
+
+      let reasoning_content = '';
+
+      // Handle content array format (Anthropic/OpenAI)
+      if (Array.isArray(msg.content)) {
+        // Extract thinking blocks from current message
+        const thinkingBlocks = msg.content.filter(block =>
+          block.type === 'thinking' && block.thinking
+        );
+
+        // Use preserved thinking from MultiSessionManager
+        if (thinkingBlocks.length === 0 && preservedThinking) {
+          reasoning_content = preservedThinking;
+        } else if (thinkingBlocks.length > 0) {
+          reasoning_content = thinkingBlocks
+            .map(block => block.thinking)
+            .join('\n\n');
+        }
+
+        if (reasoning_content) {
+          // Get non-thinking content
+          const textContent = msg.content
+            .filter(block => block.type !== 'thinking')
+            .map(block => {
+              if (block.type === 'text') return block.text;
+              return block; // Keep tool_use, etc. as-is
+            })
+            .filter(Boolean);
+
+          // Return message with reasoning_content field
+          return {
+            role: 'assistant',
+            content: textContent.length === 1 && typeof textContent[0] === 'string'
+              ? textContent[0]  // Single text string
+              : textContent,    // Array with tool_use, etc.
+            reasoning_content: reasoning_content
+          };
+        }
+      }
+      // Handle string content format
+      else if (preservedThinking && !msg.reasoning_content) {
+        return {
+          role: 'assistant',
+          content: msg.content,
+          reasoning_content: preservedThinking
+        };
+      }
+
+      return msg;
+    });
   }
 
   restoreThinkingBlocks(messages, conversationId) {
@@ -230,4 +346,4 @@ This is critical for maintaining accuracy.
 
 }
 
-export { RequestTransformer };
+module.exports = { RequestTransformer };
