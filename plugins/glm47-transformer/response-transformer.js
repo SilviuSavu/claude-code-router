@@ -2,11 +2,38 @@
 // Converts GLM response to OpenAI extended format (with thinking.content)
 // The Anthropic endpoint transformer will then convert to final Anthropic format
 
+import crypto from 'crypto';
 
-class ResponseTransformer {
+export class ResponseTransformer {
   constructor(thinkingManager, options = {}) {
     this.thinkingManager = thinkingManager;
     this.aliasedModel = options.aliasedModel ?? 'claude-opus-4-5-20250514';
+    this.signatureVersion = options.signatureVersion ?? 2;
+  }
+
+  generateSignature(thinkingContent, messageId) {
+    const timestamp = Date.now();
+    const random = crypto.randomBytes(16).toString('hex');
+
+    const payload = {
+      v: this.signatureVersion,
+      ts: timestamp,
+      id: messageId || 'unknown',
+      r: random,
+      c: crypto.createHash('sha256').update(thinkingContent).digest('hex').substring(0, 32)
+    };
+
+    const secret = 'glm47-signature-v2';
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(JSON.stringify(payload));
+
+    const signature = `glm47_v2_${timestamp}_${random.substring(0, 16)}_${hmac.digest('hex').substring(0, 32)}`;
+
+    return {
+      version: this.signatureVersion,
+      value: signature,
+      payload
+    };
   }
 
   async transform(response) {
@@ -28,13 +55,12 @@ class ResponseTransformer {
           message.reasoning_content
         );
 
-        // Convert to OpenAI extended thinking format
-        // Generate a simple signature (timestamp-based identifier)
-        const signature = `glm47_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const signatureData = this.generateSignature(message.reasoning_content, response.id);
 
+        // Convert to OpenAI extended thinking format with enhanced signature
         message.thinking = {
           content: message.reasoning_content,
-          signature: signature
+          signature: signatureData.value
         };
 
         // Remove the original reasoning_content field
@@ -52,5 +78,3 @@ class ResponseTransformer {
     }
   }
 }
-
-module.exports = { ResponseTransformer };
