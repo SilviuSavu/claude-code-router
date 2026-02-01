@@ -1,7 +1,7 @@
 // request-transformer.js
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
 
 // Debug log file
 const DEBUG_LOG = path.join(process.env.HOME, '.claude-code-router', 'debug-web-search.log');
@@ -17,6 +17,15 @@ class RequestTransformer {
   constructor(thinkingManager, options = {}) {
     this.thinkingManager = thinkingManager;
     this.debug = options.debug ?? false;
+  }
+
+  mapEffortToThinkingParams(effort = 'high') {
+    const effortMap = {
+      low: 2048,
+      medium: 16384,
+      high: 65536
+    };
+    return { budget_tokens: effortMap[effort] ?? effortMap.high };
   }
 
   async transform(request, options) {
@@ -39,16 +48,19 @@ class RequestTransformer {
     transformed.messages = this.sanitizeMessages(transformed.messages);
 
     // 4. Add GLM-specific parameters
+    const effort = options.effort ?? 'high';
+    const effortParams = this.mapEffortToThinkingParams(effort);
     transformed.thinking = {
       type: 'enabled',
-      clear_thinking: !options.preserveThinking  // false = preserve across turns
+      clear_thinking: !options.preserveThinking,  // false = preserve across turns
+      budget_tokens: effortParams.budget_tokens
     };
 
     // 5. Ensure do_sample is true (GLM requirement)
     transformed.do_sample = true;
 
-    // 6. Set default temperature to 0.0
-    transformed.temperature = 0.0;
+    // 6. Set default temperature to 0.0, or 0.1 for low effort
+    transformed.temperature = request.temperature ?? (effort === 'low' ? 0.1 : 0.0);
 
     // 7. FIXED: Preserve tools parameter if present
     // GLM-4.7 supports OpenAI-style tools, so pass through unchanged
@@ -218,4 +230,4 @@ This is critical for maintaining accuracy.
 
 }
 
-module.exports = { RequestTransformer };
+export { RequestTransformer };

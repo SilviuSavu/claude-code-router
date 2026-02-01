@@ -35,4 +35,4 @@ class ThinkingManager {
   }
 }
 
-module.exports = { ThinkingManager };
+export { ThinkingManager };
