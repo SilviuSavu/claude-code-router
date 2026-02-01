@@ -3,15 +3,20 @@
 const { RequestTransformer } = require('./request-transformer.js');
 const { ResponseTransformer } = require('./response-transformer.js');
 const { ThinkingManager } = require('./thinking-manager.js');
-const { UncertaintyDetector } = require('./uncertainty-detector.js');
-const { UQLMInterventionHandler } = require('./uqlm-intervention.js');
 const fs = require('fs');
 const path = require('path');
 
 // Debug log file (same as request-transformer)
 const DEBUG_LOG = path.join(process.env.HOME, '.claude-code-router', 'debug-web-search.log');
 
-function debugLog(label, data) {
+let globalDebugEnabled = false;
+
+function setDebugEnabled(enabled) {
+  globalDebugEnabled = enabled;
+}
+
+function debugLog(label, data, enabled = globalDebugEnabled) {
+  if (!enabled) return;
   const timestamp = new Date().toISOString();
   const entry = `\n=== ${timestamp} === ${label} ===\n${JSON.stringify(data, null, 2)}\n`;
   fs.appendFileSync(DEBUG_LOG, entry);
@@ -19,46 +24,30 @@ function debugLog(label, data) {
 
 class GLM47Transformer {
   constructor(options = {}) {
-    this.name = 'glm47';
+    this.name = 'GLM47';
     // No endPoint - provider transformer only
     this.thinkingManager = new ThinkingManager();
 
     // Options
     this.preserveThinking = options.preserveThinking ?? true;
     this.forceReasoning = options.forceReasoning ?? true;
-    this.webSearch = options.webSearch ?? false;  // Enable Z.AI server-side web search
-    this.useAlternativeModelForWebSearch = options.useAlternativeModelForWebSearch ?? false;  // Default: keep glm-4.7
-    this.alternativeModel = options.alternativeModel ?? 'glm-4.5-air';  // Lightweight alternative
+    this.aliasedModel = options.aliasedModel ?? 'claude-opus-4-5-20250514';  // Model name to alias to for UI features
     this.debug = options.debug ?? false;
-    this.uncertaintyThreshold = options.uncertaintyThreshold ?? 0.7;
+
+    // Set global debug flag for debugLog function
+    setDebugEnabled(this.debug);
 
     // Initialize transformers with options
     this.requestTransformer = new RequestTransformer(this.thinkingManager, {
-      debug: this.debug,
-      uncertaintyThreshold: this.uncertaintyThreshold
-    });
-    this.responseTransformer = new ResponseTransformer(this.thinkingManager);
-
-    // Uncertainty detector for response analysis
-    this.uncertaintyDetector = new UncertaintyDetector({
-      threshold: this.uncertaintyThreshold,
       debug: this.debug
     });
-
-    // UQLM Real-time Intervention Handler
-    this.uqlmHandler = new UQLMInterventionHandler({
-      confusionThreshold: options.uqlmThreshold || 2,
-      debug: true, // Force debug for testing
-      bufferSize: options.uqlmBufferSize || 200,
-      maxRetries: options.uqlmMaxRetries || 1,
-      enabled: options.uqlmEnabled !== false, // Default: enabled
+    this.responseTransformer = new ResponseTransformer(this.thinkingManager, {
+      aliasedModel: this.aliasedModel
     });
-    console.log('[GLM47] ✅ UQLM Intervention Handler initialized');
   }
 
   // Called to convert incoming Anthropic request to unified format
   async transformRequestOut(request, context) {
-    console.log('[GLM47] transformRequestOut called');
     // For /v1/messages endpoint, the incoming request is already in Anthropic format
     // Just return it as unified format (Anthropic format IS the unified format here)
     return request;
@@ -66,26 +55,20 @@ class GLM47Transformer {
 
   // Called before sending request to GLM
   async transformRequestIn(request) {
-    console.log('[GLM47] transformRequestIn called');
     return this.requestTransformer.transform(request, {
       preserveThinking: this.preserveThinking,
-      forceReasoning: this.forceReasoning,
-      webSearch: this.webSearch,
-      useAlternativeModelForWebSearch: this.useAlternativeModelForWebSearch,
-      alternativeModel: this.alternativeModel
+      forceReasoning: this.forceReasoning
     });
   }
 
   // Called to process raw HTTP Response from GLM
   // Called for provider transformers to transform response before endpoint transformer
   async transformResponseOut(response, context) {
-    console.log('[GLM47] transformResponseOut called');
     try {
       const contentType = response.headers?.get?.("Content-Type") || "";
       const isStream = contentType.includes("text/event-stream");
 
       if (isStream) {
-        console.log('[GLM47] Processing streaming response');
         return this.transformStreamingResponse(response, context);
       }
 
@@ -107,7 +90,6 @@ class GLM47Transformer {
       // Preserve web_search results in converted response
       if (data.web_search) {
         converted.web_search = data.web_search;
-        console.log('[GLM47] Preserved web_search results in response:', data.web_search.length, 'results');
       }
 
       // Return Response with OpenAI extended thinking format
@@ -117,7 +99,6 @@ class GLM47Transformer {
         statusText: response.statusText
       });
     } catch (error) {
-      console.error('[GLM47] transformResponseOut error:', error);
       return response;
     }
   }
@@ -166,59 +147,31 @@ class GLM47Transformer {
               try {
                 const chunk = JSON.parse(data);
 
-                // DEBUG: Log first chunk to see structure, and any chunk with web_search
+                // DEBUG: Log first chunk structure
                 if (!firstChunkLogged) {
                   firstChunkLogged = true;
-                  debugLog('FIRST_RESPONSE_CHUNK', {
-                    chunkKeys: Object.keys(chunk),
-                    hasWebSearch: !!chunk.web_search,
-                    model: chunk.model,
-                    id: chunk.id
-                  });
-                }
-                if (chunk.web_search) {
-                  debugLog('RESPONSE_CHUNK_WITH_WEB_SEARCH', {
-                    webSearchCount: chunk.web_search.length,
-                    webSearchSample: chunk.web_search[0]
-                  });
                 }
 
-                // Convert reasoning_content delta to thinking delta
-                if (chunk.choices?.[0]?.delta?.reasoning_content) {
-                  const reasoning = chunk.choices[0].delta.reasoning_content;
+                // Add null check for choices
+                if (!chunk.choices || chunk.choices.length === 0) {
+                  continue;
+                }
+
+                const choice0 = chunk.choices[0];
+
+                // Monitor reasoning_content (CCR converts it to thinking.content AFTER this transformer)
+                if (choice0.delta?.reasoning_content) {
+                  const reasoning = choice0.delta.reasoning_content;
                   thinkingBuffer += reasoning;
-
-                  // 🔍 UQLM REAL-TIME MONITORING - Check for confusion as thinking streams
-                  const interventionCheck = self.uqlmHandler.monitorThinking(reasoning, thinkingBuffer, context);
-
-                  if (interventionCheck.shouldIntervene) {
-                    console.log('[UQLM] 🚨🚨🚨 CONFUSION DETECTED - INTERVENTION NEEDED 🚨🚨🚨');
-                    console.log('[UQLM] Analysis:', interventionCheck.analysis);
-                    console.log('[UQLM] Model is confused and about to hallucinate!');
-
-                    // TODO: Full intervention implementation would:
-                    // 1. Cancel this stream
-                    // 2. Create intervention request with forced web search
-                    // 3. Make new request to LLM
-                    // 4. Stream the new response instead
-                    //
-                    // For now: Log the detection and let response complete
-                    // The post-response analysis will catch it
-
-                    if (context) {
-                      context.uqlmInterventionDetected = true;
-                      context.uqlmAnalysis = interventionCheck.analysis;
-                    }
-                  }
 
                   // Create new chunk with thinking instead of reasoning_content
                   const transformedChunk = {
                     ...chunk,
-                    model: 'claude-opus-4-5-20250514', // Alias for Claude Code UI features
+                    model: self.aliasedModel, // Alias for Claude Code UI features
                     choices: [{
-                      ...chunk.choices[0],
+                      ...choice0,
                       delta: {
-                        ...chunk.choices[0].delta,
+                        ...choice0.delta,
                         thinking: {
                           content: reasoning
                         }
@@ -232,15 +185,15 @@ class GLM47Transformer {
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(transformedChunk)}\n\n`));
                 }
                 // Check if thinking is complete (when we get content after reasoning)
-                else if (chunk.choices?.[0]?.delta?.content && thinkingBuffer && !isThinkingComplete) {
+                else if (choice0.delta?.content && thinkingBuffer && !isThinkingComplete) {
                   // Mark thinking as complete, then send content with aliased model
                   isThinkingComplete = true;
-                  chunk.model = 'claude-opus-4-5-20250514';
+                  chunk.model = self.aliasedModel;
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
                 }
                 else {
                   // Pass through with aliased model
-                  chunk.model = 'claude-opus-4-5-20250514';
+                  chunk.model = self.aliasedModel;
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
                 }
               } catch (e) {
@@ -255,36 +208,8 @@ class GLM47Transformer {
             controller.enqueue(encoder.encode(`${buffer}\n`));
           }
 
-          // Analyze thinking content for uncertainty (after stream completes)
-          if (thinkingBuffer && self.uncertaintyDetector) {
-            const analysis = self.uncertaintyDetector.analyzeThinking(thinkingBuffer);
-
-            if (!analysis.confident) {
-              console.log('[GLM47] ⚠️ UNCERTAINTY DETECTED in response');
-              console.log(`[GLM47] Confidence score: ${analysis.score.toFixed(2)} (threshold: ${self.uncertaintyThreshold})`);
-              console.log(`[GLM47] Analysis: ${analysis.analysis}`);
-
-              if (analysis.strongSignals && analysis.strongSignals.length > 0) {
-                console.log('[GLM47] Strong signals:', analysis.strongSignals.join(', '));
-              }
-
-              // Store uncertainty analysis in context for potential future use
-              if (context) {
-                context.uncertaintyAnalysis = analysis;
-              }
-
-              // Check for knowledge cutoff issues specifically
-              if (self.uncertaintyDetector.hasKnowledgeCutoffIssues(thinkingBuffer)) {
-                console.log('[GLM47] ⚠️ KNOWLEDGE CUTOFF issue detected - web search may help');
-              }
-            } else if (self.debug) {
-              console.log(`[GLM47] Response confidence: ${analysis.score.toFixed(2)} ✓`);
-            }
-          }
-
           controller.close();
         } catch (error) {
-          console.error('[GLM47] Stream processing error:', error);
           controller.error(error);
         } finally {
           reader.releaseLock();
@@ -307,10 +232,6 @@ class GLM47Transformer {
   // Streaming is handled inline in transformStreamingResponse()
   // These methods are kept for potential future router API changes
 
-  // Get uncertainty detector for external analysis
-  getUncertaintyDetector() {
-    return this.uncertaintyDetector;
-  }
 }
 
-module.exports = { GLM47Transformer };
+module.exports = GLM47Transformer;
