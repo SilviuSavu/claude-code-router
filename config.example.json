@@ -1,0 +1,85 @@
+{
+  "LOG": true,
+  "LOG_LEVEL": "debug",
+  "CLAUDE_PATH": "",
+  "HOST": "127.0.0.1",
+  "PORT": 3457,
+  "APIKEY": "",
+  "API_TIMEOUT_MS": "3000000",
+  "PROXY_URL": "",
+  "transformers": [],
+  "Providers": [
+    {
+      "name": "zai-openai",
+      "api_base_url": "https://api.z.ai/api/coding/paas/v4/chat/completions",
+      "api_key": "YOUR_Z_AI_API_KEY_HERE",
+      "models": [
+        "glm-4.7",
+        "glm-4.6",
+        "glm-4.5",
+        "glm-4.5-air"
+      ],
+      "transformer": {
+        "use": ["GLM47"]
+      }
+    }
+  ],
+  "StatusLine": {
+    "enabled": false,
+    "currentStyle": "default",
+    "default": {
+      "modules": [
+        {
+          "type": "model",
+          "icon": "🤖",
+          "text": "{{model}}",
+          "color": "bright_yellow"
+        },
+        {
+          "type": "usage",
+          "icon": "📊",
+          "text": "{{inputTokens}} → {{outputTokens}}",
+          "color": "bright_magenta"
+        },
+        {
+          "type": "speed",
+          "icon": "⚡",
+          "text": "{{tokenSpeed}}",
+          "color": "bright_green"
+        }
+      ]
+    },
+    "powerline": {
+      "modules": [
+        {
+          "type": "model",
+          "icon": "🤖",
+          "text": "{{model}}",
+          "color": "bright_yellow"
+        },
+        {
+          "type": "speed",
+          "icon": "⚡",
+          "text": "{{tokenSpeed}}",
+          "color": "bright_green"
+        },
+        {
+          "type": "usage",
+          "icon": "📊",
+          "text": "{{inputTokens}} → {{outputTokens}}",
+          "color": "bright_magenta"
+        }
+      ]
+    }
+  },
+  "Router": {
+    "default": "zai-openai,glm-4.7",
+    "background": "zai-openai,glm-4.7",
+    "think": "zai-openai,glm-4.7",
+    "longContext": "zai-openai,glm-4.7",
+    "longContextThreshold": 200000,
+    "webSearch": "zai-openai,glm-4.7",
+    "image": "zai-openai,glm-4.7"
+  },
+  "CUSTOM_ROUTER_PATH": ""
+}
