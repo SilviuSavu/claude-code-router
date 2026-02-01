@@ -4,6 +4,7 @@ const { RequestTransformer } = require('./request-transformer.js');
 const { ResponseTransformer } = require('./response-transformer.js');
 const { ThinkingManager } = require('./thinking-manager.js');
 const { UncertaintyDetector } = require('./uncertainty-detector.js');
+const { UQLMInterventionHandler } = require('./uqlm-intervention.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -42,6 +43,15 @@ class GLM47Transformer {
     this.uncertaintyDetector = new UncertaintyDetector({
       threshold: this.uncertaintyThreshold,
       debug: this.debug
+    });
+
+    // UQLM Real-time Intervention Handler
+    this.uqlmHandler = new UQLMInterventionHandler({
+      confusionThreshold: options.uqlmThreshold || 2,
+      debug: this.debug,
+      bufferSize: options.uqlmBufferSize || 200,
+      maxRetries: options.uqlmMaxRetries || 1,
+      enabled: options.uqlmEnabled !== false, // Default: enabled
     });
   }
 
@@ -176,6 +186,29 @@ class GLM47Transformer {
                 if (chunk.choices?.[0]?.delta?.reasoning_content) {
                   const reasoning = chunk.choices[0].delta.reasoning_content;
                   thinkingBuffer += reasoning;
+
+                  // 🔍 UQLM REAL-TIME MONITORING - Check for confusion as thinking streams
+                  const interventionCheck = self.uqlmHandler.monitorThinking(reasoning, thinkingBuffer, context);
+
+                  if (interventionCheck.shouldIntervene) {
+                    console.log('[UQLM] 🚨🚨🚨 CONFUSION DETECTED - INTERVENTION NEEDED 🚨🚨🚨');
+                    console.log('[UQLM] Analysis:', interventionCheck.analysis);
+                    console.log('[UQLM] Model is confused and about to hallucinate!');
+
+                    // TODO: Full intervention implementation would:
+                    // 1. Cancel this stream
+                    // 2. Create intervention request with forced web search
+                    // 3. Make new request to LLM
+                    // 4. Stream the new response instead
+                    //
+                    // For now: Log the detection and let response complete
+                    // The post-response analysis will catch it
+
+                    if (context) {
+                      context.uqlmInterventionDetected = true;
+                      context.uqlmAnalysis = interventionCheck.analysis;
+                    }
+                  }
 
                   // Create new chunk with thinking instead of reasoning_content
                   const transformedChunk = {

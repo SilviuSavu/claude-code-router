@@ -113,42 +113,34 @@ class RequestTransformer {
         }
       }
 
-      // Inject Z.AI web_search tool when uncertainty detected
+      // Check if query needs current info (hallucination prevention)
       const searchAnalysis = this.uncertaintyDetector.shouldForceWebSearch(request);
 
       if (searchAnalysis.shouldForce) {
-        console.log('[GLM47] Web search tool INJECTED - query needs current info');
+        console.log('[GLM47] 🔍 HALLUCINATION PREVENTION - query needs current info');
         console.log('[GLM47] Matched keywords:', searchAnalysis.keywords.join(', '));
 
-        // Extract user's actual query for the search
-        const userQuery = this.extractUserQuery(request.messages);
-        console.log('[GLM47] User query for search:', userQuery);
+        // Find MCP web search tool in tools array
+        const mcpWebSearchTool = (transformed.tools || []).find(t =>
+          t.type === 'function' &&
+          t.function?.name === 'mcp__web-search-prime__webSearchPrime'
+        );
 
-        // Inject Z.AI's native web_search tool into the tools array
-        transformed.tools = this.injectWebSearchTool(transformed.tools || [], searchAnalysis.keywords, userQuery);
+        if (mcpWebSearchTool) {
+          // Force the model to use the MCP web search tool
+          transformed.tool_choice = {
+            type: "function",
+            function: { name: "mcp__web-search-prime__webSearchPrime" }
+          };
+          console.log('[GLM47] 🎯 Forcing MCP web search tool to prevent hallucination');
 
-        // CRITICAL: Force web_search tool to be used
-        // Setting to "required" forces the model to use a tool
-        transformed.tool_choice = "required";
-        console.log('[GLM47] Set tool_choice to "required" to force web search usage');
+          // Inject hint into system message
+          transformed.messages = this.injectWebSearchHint(transformed.messages, searchAnalysis.keywords);
 
-        // Also inject a hint into the system message
-        transformed.messages = this.injectWebSearchHint(transformed.messages, searchAnalysis.keywords);
-
-        // OPTIONAL: Switch to alternative model for web search
-        // Note: glm-4.7 is "optimized agentic coding" per Z.AI docs, may not need this
-        // Available alternatives: glm-4.5-air (lightweight), glm-4.6 (strong coding)
-        if (options.useAlternativeModelForWebSearch && options.alternativeModel) {
-          transformed.model = options.alternativeModel;  // e.g., 'glm-4.5-air' or 'glm-4.6'
-          console.log('[GLM47] Switched to', options.alternativeModel, 'for web search');
-        }
-
-        // Disable streaming for web search requests
-        // This allows the model to see all search results before responding
-        if (transformed.stream) {
-          console.log('[GLM47] Disabling streaming for web search request');
-          transformed.stream = false;
-          transformed._webSearchDisabledStreaming = true;  // Flag for response handler
+        } else {
+          console.log('[GLM47] ⚠️  MCP web search tool not found, letting model choose');
+          // MCP tool should always be present from Claude Code
+          // If not found, just let model decide naturally
         }
 
         // DEBUG: Log the injected tools
