@@ -48,11 +48,12 @@ class GLM47Transformer {
     // UQLM Real-time Intervention Handler
     this.uqlmHandler = new UQLMInterventionHandler({
       confusionThreshold: options.uqlmThreshold || 2,
-      debug: this.debug,
+      debug: true, // Force debug for testing
       bufferSize: options.uqlmBufferSize || 200,
       maxRetries: options.uqlmMaxRetries || 1,
       enabled: options.uqlmEnabled !== false, // Default: enabled
     });
+    console.log('[GLM47] ✅ UQLM Intervention Handler initialized');
   }
 
   // Called to convert incoming Anthropic request to unified format
@@ -312,4 +313,4 @@ class GLM47Transformer {
   }
 }
 
-module.exports = GLM47Transformer;
+module.exports = { GLM47Transformer };
