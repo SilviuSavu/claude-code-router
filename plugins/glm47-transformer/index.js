@@ -7,6 +7,7 @@ const { TokenOptimizer } = require('./token-optimizer.js');
 const { MultiSessionManager } = require('./multi-session-manager.js');
 const { HallucinationDetector } = require('./hallucination-detector.js');
 const { HallucinationIntervention } = require('./hallucination-intervention.js');
+const { ConversationContradictionDetector } = require('./conversation-contradiction-detector.js');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -174,6 +175,11 @@ class GLM47Transformer {
     this.hallucinationAutoIntervene = options.hallucinationAutoIntervene ?? false;
     this.hallucinationStopOnDetect = options.hallucinationStopOnDetect ?? false; // Stop stream when hallucination detected
 
+    // Contradiction tracking options (Tier 2.1)
+    this.contradictionTrackingEnabled = options.contradictionTrackingEnabled ?? false;
+    this.contradictionSeverityThreshold = options.contradictionSeverityThreshold ?? 2;
+    this.contradictionMaxHistory = options.contradictionMaxHistory ?? 50;
+
     // Initialize HallucinationDetector if enabled
     this.hallucinationDetector = this.hallucinationDetectionEnabled
       ? new (require('./hallucination-detector.js').HallucinationDetector)({
@@ -191,6 +197,19 @@ class GLM47Transformer {
           debug: this.debug
         })
       : null;
+
+    // Initialize ConversationContradictionDetector if enabled (Tier 2.1)
+    this.contradictionDetector = this.contradictionTrackingEnabled
+      ? new ConversationContradictionDetector({
+          enabled: true,
+          maxHistoryItems: this.contradictionMaxHistory,
+          severityThreshold: this.contradictionSeverityThreshold,
+          debug: this.debug
+        })
+      : null;
+
+    // Track turn index for contradiction detection
+    this.turnIndex = 0;
   }
 
   // Extract conversation ID from request
@@ -434,6 +453,28 @@ class GLM47Transformer {
                       thinkingLength: thinkingBuffer.length
                     }, self.debug);
                   }
+
+                  // Run contradiction detection (Tier 2.1)
+                  if (self.contradictionDetector && self.currentConversationId) {
+                    self.turnIndex++;
+                    const contradictionAnalysis = self.contradictionDetector.analyze(
+                      self.currentConversationId,
+                      thinkingBuffer,
+                      self.turnIndex
+                    );
+
+                    if (contradictionAnalysis.detected) {
+                      debugLog('CONTRADICTION_DETECTED_ON_DONE', {
+                        conversationId: self.currentConversationId,
+                        score: contradictionAnalysis.score,
+                        severity: contradictionAnalysis.severity,
+                        count: contradictionAnalysis.count,
+                        contradictions: contradictionAnalysis.contradictions
+                      }, self.debug);
+
+                      statusLine(`CONTRADICTION! Score:${contradictionAnalysis.score} Severity:${contradictionAnalysis.severity}`, self.debug);
+                    }
+                  }
                 }
                 controller.enqueue(encoder.encode('data: [DONE]\n\n'));
                 continue;
@@ -629,6 +670,31 @@ class GLM47Transformer {
                       agentId: self.currentAgentId,
                       thinkingLength: thinkingBuffer.length
                     }, self.debug);
+                  }
+
+                  // Run contradiction detection after thinking completes (Tier 2.1)
+                  if (self.contradictionDetector && self.currentConversationId) {
+                    self.turnIndex++;
+                    const contradictionAnalysis = self.contradictionDetector.analyze(
+                      self.currentConversationId,
+                      thinkingBuffer,
+                      self.turnIndex
+                    );
+
+                    if (contradictionAnalysis.detected) {
+                      debugLog('CONTRADICTION_DETECTED', {
+                        conversationId: self.currentConversationId,
+                        score: contradictionAnalysis.score,
+                        severity: contradictionAnalysis.severity,
+                        count: contradictionAnalysis.count,
+                        contradictions: contradictionAnalysis.contradictions
+                      }, self.debug);
+
+                      statusLine(`CONTRADICTION! Score:${contradictionAnalysis.score} Severity:${contradictionAnalysis.severity}`, self.debug);
+
+                      // Note: Contradictions are logged but don't trigger intervention in streaming
+                      // They can be used for post-processing or future enhancements
+                    }
                   }
 
                   chunk.model = self.aliasedModel;

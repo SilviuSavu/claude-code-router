@@ -102,6 +102,19 @@ class HallucinationDetector {
           /it\s+appears\s+(that|as\s+if)/gi,
           /i\s+(would|might|could)(\s+(say|suggest|imagine|guess|assume))/gi,
         ]
+      },
+      // Weight 2: Premature conclusion (Tier 2.2)
+      // Inspired by r1-overthinker research - detects when model stops thinking too early
+      prematureConclusion: {
+        weight: 2,
+        patterns: [
+          /^.{0,100}(therefore|thus|so)\s+(the\s+answer|we\s+can\s+conclude)/gi,
+          /without\s+(thinking|reasoning)\s+(further|more)/gi,
+          /^.{0,150}(quickly|simply|obviously)\s+(the\s+answer)/gi,
+          /(immediately|right\s+away|straight\s+away)\s+(clear|obvious|apparent)\s+that/gi,
+          /^.{0,100}(the\s+answer\s+is\s+clearly|it'?s\s+clear\s+that)/gi,
+          /jump(?:ing)?\s+to\s+(?:the\s+)?conclusion/gi
+        ]
       }
     };
   }
@@ -116,7 +129,8 @@ class HallucinationDetector {
         confidence: 0,
         matches: [],
         patterns: [],
-        shouldIntervene: false
+        shouldIntervene: false,
+        thinkingLength: 0
       };
     }
 
@@ -142,6 +156,24 @@ class HallucinationDetector {
           totalScore += config.weight;
         }
       }
+    }
+
+    // Thinking length analysis (Tier 2.2)
+    // Check if thinking is too short for complex queries
+    const wordCount = fullText.trim().split(/\s+/).length;
+    const thinkingTooShort = this.isThinkingTooShort(wordCount, messages);
+
+    if (thinkingTooShort) {
+      // Add to score if thinking is insufficient
+      totalScore += 1;  // Moderate penalty
+      detectedPatterns.push('insufficientThinking');
+      matches.push({
+        category: 'insufficientThinking',
+        pattern: 'thinking_length_check',
+        match: `Only ${wordCount} words of thinking`,
+        position: 0,
+        weight: 1
+      });
     }
 
     // Calculate normalized score (0-1 range)
@@ -176,8 +208,34 @@ class HallucinationDetector {
       matches,
       patterns: uniquePatterns,
       shouldIntervene,
-      textSnippet: text.substring(0, 100)
+      textSnippet: text.substring(0, 100),
+      thinkingLength: wordCount,
+      thinkingTooShort
     };
+  }
+
+  /**
+   * Check if thinking length is too short for the query complexity (Tier 2.2)
+   */
+  isThinkingTooShort(wordCount, messages) {
+    if (!messages || messages.length === 0) {
+      return false;  // Can't determine complexity without messages
+    }
+
+    // Classify query to determine expected thinking length
+    const queryType = this.queryClassifier.classify(messages);
+
+    // Minimum word counts per query type
+    const minimumThinkingWords = {
+      factualQuery: 30,       // Simple facts don't need much thinking
+      opinionQuery: 40,       // Opinions need some reasoning
+      reasoningQuery: 80,     // Complex reasoning needs substantial thinking
+      futureQuery: 40,        // Future speculation needs some thought
+      codeDebug: 60           // Code debugging needs careful analysis
+    };
+
+    const minWords = minimumThinkingWords[queryType] || 50;
+    return wordCount < minWords;
   }
 
   getSeverityLevel(normalizedScore) {
